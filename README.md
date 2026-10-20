@@ -5,6 +5,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Go Version](https://img.shields.io/badge/go-1.23%2B-00ADD8.svg)](go.mod)
 
+**English** | [简体中文](README.zh-CN.md)
+
 Schema-driven **custom (user-defined) fields** for Go services backed by
 **GORM** and **PostgreSQL JSONB**.
 
@@ -160,6 +162,95 @@ row := cfield.FormatToVO(order.Ext, configs).ToExportSlice(configs)
 Template hints look like `必填，单选，请填写以下内容的一项: [Steel/Alloy]`, matching the
 import conventions (是/否 booleans, comma-separated multi-choice, option labels
 accepted besides raw values).
+
+## Database schema (DDL)
+
+cfield needs exactly two JSONB columns: one storing the schema per entity
+(usually per tenant), one storing the values per row. Complete DDL and sample
+data:
+
+```sql
+-- 1. Schema table: one row per tenant + entity type. The `configs` column
+--    maps to cfield.ExtendConfig.
+CREATE TABLE cfield_schema (
+    id          BIGSERIAL PRIMARY KEY,
+    tenant_id   BIGINT      NOT NULL,
+    entity_type VARCHAR(64) NOT NULL,               -- e.g. 'work_order'
+    configs     JSONB       NOT NULL DEFAULT '[]',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (tenant_id, entity_type)
+);
+
+-- 2. Business table: one JSONB column holds all custom field values.
+--    The `ext` column maps to cfield.ExtendData.
+CREATE TABLE work_order (
+    id       BIGSERIAL PRIMARY KEY,
+    order_no VARCHAR(64) NOT NULL,
+    ext      JSONB       NOT NULL DEFAULT '{}'
+);
+
+-- 3. Optional: expression indexes for fields you filter on frequently.
+--    Equality / range queries on ->> text benefit from a btree index:
+CREATE INDEX idx_work_order_region   ON work_order ((ext->>'region'));
+CREATE INDEX idx_work_order_priority ON work_order (((ext->>'priority')::numeric));
+```
+
+Sample rows:
+
+```sql
+INSERT INTO cfield_schema (tenant_id, entity_type, configs) VALUES (
+    1, 'work_order',
+    '[
+      {"code": "region",   "name": "Region",   "type": "string",  "required": true, "sort": 1},
+      {"code": "priority", "name": "Priority", "type": "int",     "sort": 2},
+      {"code": "due_date", "name": "Due Date", "type": "date",    "formatter": "YYYY-MM-DD", "sort": 3},
+      {"code": "urgent",   "name": "Urgent",   "type": "boolean", "sort": 4},
+      {"code": "material", "name": "Material", "type": "radio",   "sort": 5,
+       "options": [{"label": "Steel", "value": "steel"}, {"label": "Alloy", "value": "alloy"}]},
+      {"code": "tags",     "name": "Tags",     "type": "checkbox", "sort": 6,
+       "options": [{"label": "Export", "value": "export"}, {"label": "Rush", "value": "rush"}]},
+      {"code": "drawing",  "name": "Drawing",  "type": "attachment", "sort": 7,
+       "fileConfig": {"maxSize": 10485760, "accept": ".pdf,.dwg"}}
+    ]'::jsonb
+);
+
+INSERT INTO work_order (order_no, ext) VALUES (
+    'WO-2025-001',
+    '{
+      "region":   "EMEA",
+      "priority": 2,
+      "due_date": "2025-06-30",
+      "urgent":   true,
+      "material": "steel",
+      "tags":     ["export", "rush"]
+    }'::jsonb
+);
+```
+
+Matching GORM entities:
+
+```go
+type CFieldSchema struct {
+    ID         int64               `gorm:"primaryKey"`
+    TenantID   int64
+    EntityType string
+    Configs    cfield.ExtendConfig `gorm:"type:jsonb;not null;default:'[]'::jsonb"`
+}
+
+type WorkOrder struct {
+    ID      int64              `gorm:"primaryKey"`
+    OrderNo string
+    Ext     cfield.ExtendData `gorm:"type:jsonb;not null;default:'{}'::jsonb"`
+}
+```
+
+> **Indexing notes**: the expression indexes above only serve the exact
+> queries they mirror (`ext->>'region' = …`, `(ext->>'priority')::numeric
+> BETWEEN …`). Fuzzy `LIKE '%…%'` searches cannot use a btree index. A plain
+> `GIN (ext)` index only helps `@>` containment operators, which `BuildQuery`
+> does not generate — create expression indexes for your hot filter fields
+> instead.
 
 ## Field types
 
